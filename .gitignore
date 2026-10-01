@@ -1,0 +1,17 @@
+.deps/
+build*/
+build*.log
+*.log
+dist/
+__pycache__/
+*.pyc
+*.rlsb
+local-*.json
+.env
+.env.*
+*.dds
+*.nif
+*.rmesh
+*.upk
+*.tfc
+*.dmp

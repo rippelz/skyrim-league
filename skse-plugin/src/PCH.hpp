@@ -1,0 +1,25 @@
+#pragma once
+#include <SKSE/SKSE.h>
+#include <RE/A/Actor.h>
+#include <RE/A/AIProcess.h>
+#include <RE/B/BSInputDeviceManager.h>
+#include <RE/B/BSModelDB.h>
+#include <RE/B/ButtonEvent.h>
+#include <RE/I/InputEvent.h>
+#include <RE/I/IFormFactory.h>
+#include <RE/M/Misc.h>
+#include <RE/N/NiNode.h>
+#include <RE/N/NiCollisionObject.h>
+#include <RE/N/NiQuaternion.h>
+#include <RE/P/PlayerCamera.h>
+#include <RE/P/PlayerCharacter.h>
+#include <RE/P/PlayerControls.h>
+#include <RE/P/ProcessLists.h>
+#include <RE/S/SendHUDMessage.h>
+#include <RE/S/Script.h>
+#include <RE/T/TES.h>
+#include <RE/T/TESCameraState.h>
+#include <RE/U/UI.h>
+#include "shared/udp.hpp"
+#include <spdlog/sinks/basic_file_sink.h>
+using namespace std::literals;

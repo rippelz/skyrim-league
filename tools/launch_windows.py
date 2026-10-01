@@ -2,6 +2,7 @@
 """Native Steam/Windows session owner. Never stops Steam or pre-existing games."""
 import argparse,configparser,json,os,signal,subprocess,time
 from pathlib import Path
+from temporary_files import TemporaryFiles,stage_rl_runtime
 from windows_platform import ROOT,psutil_module,processes_at,identity,matching_process,place_window,monitors
 
 def update_record(folder,data):
@@ -13,7 +14,8 @@ def stop_owned(records):
         if not record.get('owned'):continue
         process=matching_process(record)
         if process:
-            try:process.terminate()
+            try:
+                process.terminate();process.wait(timeout=5)
             except psutil.Error:pass
 
 def plan(state,choices):
@@ -81,8 +83,9 @@ def main():
             nonlocal stop
             stop=True
         signal.signal(signal.SIGINT,request_stop);signal.signal(signal.SIGTERM,request_stop)
-        children=[]
+        children=[];temporary=TemporaryFiles(folder)
         try:
+            if 'rl' in commands and not a.attach:stage_rl_runtime(temporary,Path(state['bakkesmod']).parent,rl/'Binaries/Win64')
             launched=time.time();pending=set(commands);placed=set()
             for game,command in commands.items():
                 if a.attach:
@@ -113,6 +116,7 @@ def main():
             # The SKSE loader belongs to us; Steam and the official injector do not.
             for child in children:
                 if child.args[0].lower().endswith('skse64_loader.exe') and child.poll() is None:child.terminate()
+            temporary.restore()
             data['stopped']=time.time();update_record(folder,data)
             print('Session stopped; Steam, BakkesMod and attached games left running.',flush=True)
     except (OSError,ValueError,KeyError,RuntimeError) as error:p.error(str(error))

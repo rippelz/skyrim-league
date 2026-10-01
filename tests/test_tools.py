@@ -15,6 +15,20 @@ from protocol import State, FRAME, RECORD_MAGIC, EVENT, event_packet, frames, un
 from terrain import convert
 
 class BridgeTests(unittest.TestCase):
+    def test_bridge_runtime_is_scoped_to_session(self):
+        from temporary_files import TemporaryFiles,stage_rl_runtime
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);runtime=root/'runtime';game=root/'game';session=root/'session'
+            for path in (runtime,game,session):path.mkdir()
+            (runtime/'msvcp140.dll').write_bytes(b'modern');(runtime/'vcruntime140_threads.dll').write_bytes(b'extra')
+            (runtime/'unrelated.dll').write_bytes(b'ignore');(game/'msvcp140.dll').write_bytes(b'stock')
+            temporary=TemporaryFiles(session);stage_rl_runtime(temporary,runtime,game)
+            self.assertEqual((game/'msvcp140.dll').read_bytes(),b'modern')
+            self.assertFalse((game/'unrelated.dll').exists())
+            temporary.restore()
+            self.assertEqual((game/'msvcp140.dll').read_bytes(),b'stock')
+            self.assertFalse((game/'vcruntime140_threads.dll').exists())
+
     def test_cpp_python_wire_compatibility(self):
         binary = os.environ.get('BRIDGE_CORE_BINARY', str(ROOT/'build/bridge_core_tests'))
         with tempfile.TemporaryDirectory() as tmp:

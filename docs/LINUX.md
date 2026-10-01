@@ -22,7 +22,7 @@ python3 tools/install.py --address-library /path/to/Address-Library-v13.zip \
   --crt /path/to/Microsoft.VC145.CRT
 ```
 
-Matching SKSE must already be installed in Skyrim's game folder. `--crt` supplies optional matching app-local Visual C++ runtime DLLs. Backups and detected paths are written under ignored `build/`.
+Matching SKSE must already be installed in Skyrim's game folder. `--crt` supplies optional matching app-local Visual C++ runtime DLLs for Skyrim and the injector. RL’s bundled DLLs stay intact; the launcher borrows the newer injector runtimes only during a bridge session, restoring originals on stop. Backups and detected paths are written under ignored `build/`.
 
 ## Local visual assets
 

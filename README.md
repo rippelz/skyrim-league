@@ -39,7 +39,7 @@ Installation and launch reject unsupported versions. New game/BakkesMod releases
 | B / Circle | Skyrim interaction, while retaining the RL binding |
 | E | Keyboard interaction |
 
-The launcher manages owned game sessions and settings for lighting, shadows, damage, interpolation, camera follow and startup behavior. Windows offers independent Desktop/Minimized and monitor choices. Linux additionally supports private displays, browser views and Hyprland workspaces. Save Skyrim before stopping a session.
+The launcher manages owned game sessions and settings for lighting, shadows, damage, interpolation, camera follow and startup behavior. Windows offers independent Desktop/Minimized and monitor choices. Linux additionally supports private displays, browser views and Hyprland workspaces. Save Skyrim before stopping a session. Modern C++ runtime DLLs needed by the bridge are applied only during its offline session; RL’s original DLLs are restored for normal Steam/EAC launches.
 
 ## What works, and current limits
 

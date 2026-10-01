@@ -47,6 +47,8 @@ Setup keeps a backup manifest under `build\install\`. Restore matching files usi
 py -3 tools\restore.py "build\install\YOUR-BACKUP\manifest.json"
 ```
 
+The launcher scopes optional bridge runtime replacements to its owned offline RL session and restores originals afterward. Normal Steam/EAC startup keeps the stock game runtimes.
+
 Close games before restoring. Later edits are preserved when their hashes differ from the installed version.
 
 ## Build natively

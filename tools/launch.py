@@ -17,6 +17,7 @@ import time
 from contextlib import ExitStack
 from isolation import DesktopDisplay,VirtualDisplay,graphics_environment,proton_command,require_steam_client
 from prepare_viewer import prepare
+from temporary_files import TemporaryFiles,stage_rl_runtime
 
 ROOT=Path(__file__).resolve().parents[1]
 CRT='msvcp140,msvcp140_1,msvcp140_2,msvcp140_atomic_wait,vcruntime140,vcruntime140_1=n,b'
@@ -29,23 +30,6 @@ def environment(steam,appid,display,logs):
                SteamAppId=str(appid),SteamGameId=str(appid),SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS='1',PROTON_USE_SDL='1',PROTON_LOG='1',PROTON_LOG_DIR=str(logs),WINEDLLOVERRIDES=CRT)
     return env
 
-class TemporaryFiles:
-    """Keep recovery bytes on disk; restore only files still equal to our write."""
-    def __init__(self,folder):self.folder=folder;self.entries=[]
-    def put(self,path,content):
-        before=path.read_bytes() if path.exists() else None
-        backup=self.folder/f'original-{len(self.entries)}.bin'
-        if before is not None:backup.write_bytes(before)
-        self.entries.append(dict(path=str(path),backup=str(backup) if before is not None else None,sha256=hashlib.sha256(content).hexdigest()))
-        (self.folder/'temporary-files.json').write_text(json.dumps(self.entries,indent=2)+'\n')
-        path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(content)
-    def restore(self):
-        for e in reversed(self.entries):
-            path=Path(e['path'])
-            if not path.exists() or hashlib.sha256(path.read_bytes()).hexdigest()!=e['sha256']:
-                print('Kept a changed setting file; original saved in '+str(self.folder),flush=True);continue
-            if e['backup']:path.write_bytes(Path(e['backup']).read_bytes())
-            else:path.unlink()
 
 def port_free(port):
     with socket.socket() as s:
@@ -159,6 +143,7 @@ def main():
                 if a.viewer_only:continue
                 env=environment(steam,appid,display,logs)
                 if name=='rl':
+                    stage_rl_runtime(temporary,bm.parent,steam/'steamapps/common/rocketleague/Binaries/Win64')
                     config=bm/'cfg/plugins.cfg'
                     commands=config.read_text().rstrip()
                     if 'plugin load RocketSkyrim' not in commands:commands+='\nplugin load RocketSkyrim'

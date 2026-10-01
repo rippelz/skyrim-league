@@ -118,9 +118,10 @@ def main():
     if not re.search(r'^\s*plugin\s+load\s+RocketSkyrim\s*$', text, re.M | re.I):
         install.put(config, (text.rstrip()+'\nplugin load RocketSkyrim\n').encode())
     if a.crt:
-        # App-local DLLs avoid modifying Wine's shared system32 or other prefixes.
+        # RL's stock DLLs must survive normal/EAC launches. The bridge launcher
+        # borrows these modern DLLs from the injector directory for its session.
         for source in a.crt.glob('*.dll'):
-            for destination in (sky, rl/'Binaries/Win64', bm.parent):
+            for destination in (sky, bm.parent):
                 install.copy(source, destination/source.name)
     install.save()
     report = dict(steam=str(steam), skyrim=str(sky), bakkesmod=str(bm),

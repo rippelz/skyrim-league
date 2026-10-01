@@ -99,7 +99,7 @@ def main():
         if not re.search(r'^\s*plugin\s+load\s+RocketSkyrim\s*$',text,re.M|re.I):install.put(cfg,(text.rstrip()+'\nplugin load RocketSkyrim\n').encode())
         # Optional app-local redistributable files from the Windows bundle.
         for source in (ROOT/'runtime').glob('*.dll'):
-            for folder in (sky,rl/'Binaries/Win64'):install.copy(source,folder/source.name)
+            for folder in (sky,bm.parent):install.copy(source,folder/source.name)
         install.save();report['backup_manifest']=str(install.folder/'manifest.json')
         (ROOT/'build/install-state.json').write_text(json.dumps(report,indent=2)+'\n')
         print(json.dumps(report,indent=2));print('Installed. Open bridge-ui.cmd to manage Skyrim League.')

@@ -37,6 +37,12 @@ int main(int argc,char** argv) {
   require(actor_impact(2300,180,.03f).damage>200,"high-speed car hit should be lethal for ordinary NPCs");
   require(actor_impact(1000,30,.03f).damage<actor_impact(1000,180,.03f).damage,"lighter ball damage exceeds car damage");
   TerrainHeader terrain{};terrain.session=7;terrain.generation=1;terrain.triangles=1;
+  for(float height:{-75000.f,-15000.f,0.f,75000.f}) {
+    const Vec3 wire{123.25f,-567.5f,height+17.125f};
+    const auto native=wire+kNativeTerrainOffset;
+    require(native.z>1000,"deep Skyrim descent enters RL arena/respawn height");
+    require(near(native-kNativeTerrainOffset,wire),"height buffer changed transmitted coordinates");
+  }
   require(valid(terrain),"valid terrain header rejected");
   auto invalid_terrain=terrain;invalid_terrain.triangles=kTerrainLimit+1;require(!valid(invalid_terrain),"oversized terrain accepted");
   invalid_terrain=terrain;invalid_terrain.session=0;require(!valid(invalid_terrain),"sessionless terrain accepted");

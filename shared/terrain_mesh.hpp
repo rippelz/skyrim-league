@@ -7,7 +7,11 @@ constexpr std::uint32_t kTerrainMagic=0x4d544c52; // RLTM
 constexpr std::uint32_t kTerrainLimit=250000;
 // Keep native RL camera calculations above the stock arena floor. Wire coordinates
 // remain unchanged so Skyrim calibration, resets and recordings are continuous.
-constexpr Vec3 kNativeTerrainOffset{0,0,10000};
+// A 10,000-unit lift still reaches RL's kill plane on long mountain descents.
+// Leave 100,000 RL units (about 70,000 Skyrim units at default scale) of headroom.
+// Share this offset with terrain and moving-body contacts; lifting only the car
+// would detach it from both collision worlds.
+constexpr Vec3 kNativeTerrainOffset{0,0,100000};
 struct TerrainHeader {
   std::uint32_t magic=kTerrainMagic,version=1;
   std::uint64_t session{},generation{};

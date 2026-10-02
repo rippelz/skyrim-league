@@ -33,7 +33,7 @@ namespace direct_render {
 namespace {
 template<class T> void release(T*& p) { if(p) p->Release();p=nullptr; }
 struct LocalLight {RE::NiPoint3 position;float radius;float color[3];};
-struct Pose { bool active{},car_visible{},ball_visible{},boosting{};RE::NiTransform car{},ball{};std::vector<LocalLight> lights;float sun_visibility[2]{1,1},sky_visibility[2]{1,1};float brightness=1.0f;bool cast_shadows=true; };
+struct Pose { bool active{},car_visible{},ball_visible{},boosting{};RE::NiTransform car{},ball{};std::vector<LocalLight> lights;float sky_visibility[2]{1,1};float brightness=1.0f;bool cast_shadows=true,exterior=true; };
 std::mutex pose_mutex;Pose pose;
 struct Vertex { float position[3],normal[3],uv[2],color[4]; };
 struct Mesh { ID3D11Buffer* vertices{};ID3D11ShaderResourceView* texture{},*normal{},*paint_mask{};UINT count{};bool ball{};float roughness=.65f,metallic=.02f,normal_alpha{},style{}; };
@@ -46,9 +46,45 @@ ID3D11PixelShader* boost_ps{};ID3D11Buffer* boost_vertices{};ID3D11ShaderResourc
 ID3D11BlendState* boost_blend{};ID3D11DepthStencilState* boost_depth_normal{},*boost_depth_reverse{};
 UINT boost_count{};
 bool initialized{},failed{};std::atomic<bool> ready{false};
+// Render-thread-only views of the native sun cascades. Keep the actual depth,
+// not Skyrim's screen-space shadow mask (which uses the ground behind our mesh).
+struct SunCascade { ID3D11ShaderResourceView* view{};ID3D11Texture2D* texture{};unsigned slice{};float transform[4][4]{};float width{},height{},reversed{}; };
+SunCascade sun_cascades[4]{};std::uint64_t sun_cascade_time{};
+void clear_sun_cascades(){for(auto& cascade:sun_cascades){release(cascade.view);cascade={};}sun_cascade_time=0;}
+DXGI_FORMAT shadow_resource_format(DXGI_FORMAT format){
+  switch(format){
+    case DXGI_FORMAT_R32_TYPELESS:return DXGI_FORMAT_R32_FLOAT;
+    case DXGI_FORMAT_R16_TYPELESS:return DXGI_FORMAT_R16_UNORM;
+    case DXGI_FORMAT_R24G8_TYPELESS:return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+    case DXGI_FORMAT_R32G8X24_TYPELESS:return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+    default:return DXGI_FORMAT_UNKNOWN;
+  }
+}
 constexpr char shader[]=R"(
-cbuffer Object : register(b0) { row_major float4x4 viewProj;row_major float4x4 model;float4 sunlight;float4 sunColor;float4 ambient[6];float4 fogRange;float4 fogNear;float4 fogFar;float4 material;float4 renderParams;float4 paintColor;float4 surface;float4 localPosition[8];float4 localColor[8]; };
+cbuffer Object : register(b0) { row_major float4x4 viewProj;row_major float4x4 model;float4 sunlight;float4 sunColor;float4 ambient[6];float4 fogRange;float4 fogNear;float4 fogFar;float4 material;float4 renderParams;float4 paintColor;float4 surface;float4 localPosition[8];float4 localColor[8];row_major float4x4 sunTransform[4];float4 sunParams[4]; };
 Texture2D paintMask : register(t3);
+Texture2DArray<float> sunDepth0 : register(t4);Texture2DArray<float> sunDepth1 : register(t5);
+Texture2DArray<float> sunDepth2 : register(t6);Texture2DArray<float> sunDepth3 : register(t7);
+float cascade_visibility(Texture2DArray<float> depth,row_major float4x4 transform,float4 parameters,float3 position,float nl) {
+ if(parameters.w<.5)return -1;
+ float4 clip=mul(transform,float4(position,1));if(clip.w<=0)return -1;
+ float3 projected=clip.xyz/clip.w;float2 uv=float2(projected.x*.5+.5,.5-projected.y*.5);
+ // Skip the edge so a wider cascade supplies a complete filter footprint.
+ if(any(uv<1.5/parameters.xy) || any(uv>1-1.5/parameters.xy) || projected.z<0 || projected.z>1)return -1;
+ int2 texel=int2(uv*parameters.xy);float visibility=0;
+ float bias=.00003+.00015*(1-nl);
+ [unroll]for(int y=-1;y<=1;++y)[unroll]for(int x=-1;x<=1;++x){
+  float stored=depth.Load(int4(texel+int2(x,y),0,0));
+  visibility+=parameters.z>.5?(projected.z+bias>=stored?1:0):(projected.z-bias<=stored?1:0);
+ }
+ return visibility/9;
+}
+float sun_visibility(float3 position,float nl) {
+ float value=cascade_visibility(sunDepth0,sunTransform[0],sunParams[0],position,nl);if(value>=0)return value;
+ value=cascade_visibility(sunDepth1,sunTransform[1],sunParams[1],position,nl);if(value>=0)return value;
+ value=cascade_visibility(sunDepth2,sunTransform[2],sunParams[2],position,nl);if(value>=0)return value;
+ value=cascade_visibility(sunDepth3,sunTransform[3],sunParams[3],position,nl);return value>=0?value:1;
+}
 Texture2D diffuse : register(t0);Texture2D normalMap : register(t1);SamplerState samp : register(s0);
 struct Input { float3 position:POSITION;float3 normal:NORMAL;float2 uv:TEXCOORD0;float4 color:COLOR0; };
 struct Output { float4 position:SV_POSITION;float3 normal:NORMAL;float2 uv:TEXCOORD0;float4 color:COLOR0;float distance:TEXCOORD1;float3 relative:TEXCOORD2; };
@@ -84,7 +120,7 @@ float4 PS(Output i):SV_TARGET {
  float dielectric=surface.x>3.5 && surface.x<4.5?.07:.04;
  float3 f0=lerp(float3(dielectric,dielectric,dielectric),base,metal),fresnel=f0+(1-f0)*pow(1-vh,5);
  float3 spec=distribution*geometry*fresnel/max(4*nv*max(nl,.001),.001);
- float sunVisible=material.w;
+ float sunVisible=sun_visibility(i.relative,saturate(dot(geometric,l)));
  // Skyrim's screen-space mask was generated from native world depth, not
  // this mesh depth. Sampling it falsely shadows the mesh with its ground shadow.
  float3 lit=base*(1-f0)*(1-metal)*environment(n)*sunlight.w*ao*.65
@@ -107,7 +143,8 @@ float4 PS(Output i):SV_TARGET {
 }
 float4 BoostPS(Output i):SV_TARGET {float4 flame=diffuse.Sample(samp,i.uv);return float4(flame.rgb*3,flame.a);}
 )";
-struct Constants { float viewProj[4][4],model[4][4],sunlight[4],sunColor[4],ambient[6][4],fogRange[4],fogNear[4],fogFar[4],material[4],renderParams[4],paintColor[4],surface[4],localPosition[8][4],localColor[8][4]; };
+struct Constants { float viewProj[4][4],model[4][4],sunlight[4],sunColor[4],ambient[6][4],fogRange[4],fogNear[4],fogFar[4],material[4],renderParams[4],paintColor[4],surface[4],localPosition[8][4],localColor[8][4],sunTransform[4][4][4],sunParams[4][4]; };
+static_assert(sizeof(Constants)==944 && offsetof(Constants,sunTransform)==624 && offsetof(Constants,sunParams)==880);
 		struct StateBackup
 		{
 			ID3D11RenderTargetView*   rtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
@@ -311,23 +348,30 @@ void draw() {
         color(c.fogNear,sky->skyColor[RE::TESWeather::ColorTypes::kFogNear]);color(c.fogFar,sky->skyColor[RE::TESWeather::ColorTypes::kFogFar]);
       }
     }
+    if(!current.exterior)for(float& channel:c.sunColor)channel=0;
     for(std::size_t i=0;i<std::min<std::size_t>(current.lights.size(),8);++i){const auto& l=current.lights[i];
       c.localPosition[i][0]=l.position.x-cam.x;c.localPosition[i][1]=l.position.y-cam.y;c.localPosition[i][2]=l.position.z-cam.z;c.localPosition[i][3]=l.radius;
       for(int channel=0;channel<3;++channel)c.localColor[i][channel]=l.color[channel];}
     c.renderParams[2]=current.brightness;
     c.renderParams[3]=0; // Native depth shadow mask does not match direct mesh depth.
+    ID3D11ShaderResourceView* sun_views[4]{};
+    if(current.exterior && GetTickCount64()-sun_cascade_time<250)for(unsigned i=0;i<4;++i){const auto& cascade=sun_cascades[i];
+      if(cascade.view && bridge::shadow_clip_matrix(cascade.transform,{cam.x,cam.y,cam.z},c.sunTransform[i])){
+        sun_views[i]=cascade.view;c.sunParams[i][0]=cascade.width;c.sunParams[i][1]=cascade.height;c.sunParams[i][2]=cascade.reversed;c.sunParams[i][3]=1;++c.renderParams[3];
+      }
+    }
     StateBackup backup;backup.Save(ctx);
     ID3D11GeometryShader* gs{};ID3D11HullShader* hs{};ID3D11DomainShader* ds{};ctx->GSGetShader(&gs,nullptr,nullptr);ctx->HSGetShader(&hs,nullptr,nullptr);ctx->DSGetShader(&ds,nullptr,nullptr);
     ctx->GSSetShader(nullptr,nullptr,0);ctx->HSSetShader(nullptr,nullptr,0);ctx->DSSetShader(nullptr,nullptr,0);
     ctx->OMSetRenderTargets(1,&rtv,dsv);ctx->OMSetBlendState(blend,nullptr,0xffffffff);ctx->OMSetDepthStencilState(reversed?depth_reverse:depth_normal,0);ctx->RSSetState(raster);
     D3D11_VIEWPORT viewport{0,0,float(td.Width),float(td.Height),0,1};ctx->RSSetViewports(1,&viewport);ctx->IASetInputLayout(layout);ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ctx->VSSetShader(vs,nullptr,0);ctx->PSSetShader(ps,nullptr,0);ctx->VSSetConstantBuffers(0,1,&constants);ctx->PSSetConstantBuffers(0,1,&constants);ctx->PSSetSamplers(0,1,&sampler);
+    ctx->VSSetShader(vs,nullptr,0);ctx->PSSetShader(ps,nullptr,0);ctx->PSSetShaderResources(4,4,sun_views);ctx->VSSetConstantBuffers(0,1,&constants);ctx->PSSetConstantBuffers(0,1,&constants);ctx->PSSetSamplers(0,1,&sampler);
     for(auto& mesh:meshes) {
       if(!(mesh.ball?current.ball_visible:current.car_visible))continue;
       const auto& object=mesh.ball?current.ball:current.car;
       for(int r=0;r<3;++r) {for(int col=0;col<3;++col)c.model[r][col]=object.rotate.entry[r][col]*object.scale;}
       c.model[0][3]=object.translate.x-cam.x;c.model[1][3]=object.translate.y-cam.y;c.model[2][3]=object.translate.z-cam.z;c.model[3][3]=1;
-      c.material[0]=mesh.roughness;c.material[1]=mesh.metallic;c.material[2]=mesh.normal_alpha;c.material[3]=current.sun_visibility[mesh.ball?1:0];c.sunlight[3]=current.sky_visibility[mesh.ball?1:0];
+      c.material[0]=mesh.roughness;c.material[1]=mesh.metallic;c.material[2]=mesh.normal_alpha;c.material[3]=1;c.sunlight[3]=current.sky_visibility[mesh.ball?1:0];
       // The extracted Fennec material's default orange team paint is linear RGB.
       c.paintColor[0]=.84337f;c.paintColor[1]=.196786f;c.paintColor[2]=0;c.paintColor[3]=mesh.paint_mask?1.0f:0.0f;c.surface[0]=mesh.style;
       ctx->PSSetShaderResources(3,1,&mesh.paint_mask);
@@ -342,7 +386,7 @@ void draw() {
       UINT stride=sizeof(Vertex),offset=0;ctx->IASetVertexBuffers(0,1,&boost_vertices,&stride,&offset);ctx->PSSetShaderResources(0,1,&boost_texture);ctx->Draw(boost_count,0);
     }
     ctx->GSSetShader(gs,nullptr,0);ctx->HSSetShader(hs,nullptr,0);ctx->DSSetShader(ds,nullptr,0);release(gs);release(hs);release(ds);backup.Restore(ctx);
-    static std::uint64_t light_log{};if(GetTickCount64()-light_log>10000){light_log=GetTickCount64();spdlog::info("Bridge lighting: sun {} {} {} ambient-up {} {} {} sun visibility {} {} sky {} {} brightness {} shadow mask {}",c.sunColor[0],c.sunColor[1],c.sunColor[2],c.ambient[4][0],c.ambient[4][1],c.ambient[4][2],current.sun_visibility[0],current.sun_visibility[1],current.sky_visibility[0],current.sky_visibility[1],current.brightness,c.renderParams[3]);}
+    static std::uint64_t light_log{};if(GetTickCount64()-light_log>10000){light_log=GetTickCount64();spdlog::info("Bridge lighting: sun {} {} {} ambient-up {} {} {} sky visibility {} {} brightness {} sun cascades {}",c.sunColor[0],c.sunColor[1],c.sunColor[2],c.ambient[4][0],c.ambient[4][1],c.ambient[4][2],current.sky_visibility[0],current.sky_visibility[1],current.brightness,c.renderParams[3]);}
     static bool logged=false;if(!logged) {logged=true;spdlog::info("Direct mesh draw: scene {}x{} format {} reversed depth {}",td.Width,td.Height,static_cast<unsigned>(td.Format),reversed);}
   } catch(const std::exception& e) {failed=true;ready.store(false);spdlog::error("Direct mesh renderer disabled: {}",e.what());}
 }
@@ -351,7 +395,7 @@ void draw() {
 void draw_shadows(RE::BSShadowLight* light) {
   static bool disabled{};if(disabled || !initialized || !light)return;
   Pose current;{std::lock_guard lock(pose_mutex);current=pose;}
-  if(!current.active || !current.cast_shadows)return;
+  if(!current.active){clear_sun_cascades();return;}
   auto* renderer=RE::BSGraphics::Renderer::GetSingleton();auto* camera=RE::Main::WorldRootCamera();if(!renderer || !camera)return;
   auto& runtime=renderer->GetRuntimeData();auto* ctx=reinterpret_cast<ID3D11DeviceContext*>(runtime.context);auto* device=reinterpret_cast<ID3D11Device*>(runtime.forwarder);if(!ctx || !device)return;
   auto& descriptors=light->GetRuntimeData().shadowmapDescriptors;if(descriptors.size()>16)return;
@@ -359,10 +403,11 @@ void draw_shadows(RE::BSShadowLight* light) {
   ID3D11GeometryShader* gs{};ID3D11HullShader* hs{};ID3D11DomainShader* ds{};
   ctx->GSGetShader(&gs,nullptr,nullptr);ctx->HSGetShader(&hs,nullptr,nullptr);ctx->DSGetShader(&ds,nullptr,nullptr);
   ctx->GSSetShader(nullptr,nullptr,0);ctx->HSSetShader(nullptr,nullptr,0);ctx->DSSetShader(nullptr,nullptr,0);
-  unsigned drawn{};
+  unsigned drawn{},received{};sun_cascade_time=0;
   try {
     const auto cam=camera->world.translate;
     for(const auto& cascade:descriptors){
+      if(!cascade.isEnabled)continue;
       auto target=static_cast<unsigned>(cascade.renderTarget);
       if(target>=RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL)target=RE::RENDER_TARGETS_DEPTHSTENCIL::kSHADOWMAPS;
       if(target==RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN || target==RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN_COPY)continue;
@@ -374,6 +419,18 @@ void draw_shadows(RE::BSShadowLight* light) {
       Constants c{};if(!bridge::shadow_clip_matrix(cascade.lightTransform.m,{cam.x,cam.y,cam.z},c.viewProj))continue;
       RE::NiPoint3 direction{0,0,-1};if(auto* sky=RE::Sky::GetSingleton();sky && sky->sun && sky->sun->light)direction=sky->sun->light->GetWorldDirection();
       const bool reversed=c.viewProj[2][0]*direction.x+c.viewProj[2][1]*direction.y+c.viewProj[2][2]*direction.z<0;
+      if(received<4 && (desc.BindFlags&D3D11_BIND_SHADER_RESOURCE)){
+        D3D11_SHADER_RESOURCE_VIEW_DESC sv{};sv.Format=shadow_resource_format(desc.Format);sv.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+        sv.Texture2DArray.MostDetailedMip=0;sv.Texture2DArray.MipLevels=1;sv.Texture2DArray.FirstArraySlice=cascade.shadowmapIndex;sv.Texture2DArray.ArraySize=1;
+        auto& cached=sun_cascades[received];
+        if(cached.texture!=texture || cached.slice!=cascade.shadowmapIndex){release(cached.view);cached={};}
+        if(!cached.view && sv.Format!=DXGI_FORMAT_UNKNOWN)device->CreateShaderResourceView(texture,&sv,&cached.view);
+        if(cached.view){
+          cached.texture=texture;cached.slice=cascade.shadowmapIndex;std::memcpy(cached.transform,cascade.lightTransform.m,sizeof cached.transform);
+          cached.width=float(desc.Width);cached.height=float(desc.Height);cached.reversed=reversed?1.f:0.f;++received;
+        }
+      }
+      if(!current.cast_shadows)continue;
       D3D11_DEPTH_STENCIL_VIEW_DESC vd{};native_view->GetDesc(&vd);
       vd.Flags=0;
       if(desc.ArraySize>1){vd.ViewDimension=D3D11_DSV_DIMENSION_TEXTURE2DARRAY;vd.Texture2DArray.MipSlice=0;vd.Texture2DArray.FirstArraySlice=cascade.shadowmapIndex;vd.Texture2DArray.ArraySize=1;}
@@ -397,9 +454,11 @@ void draw_shadows(RE::BSShadowLight* light) {
       }
       ++drawn;
     }
-  }catch(const std::exception& e){disabled=true;spdlog::error("Mesh shadow casting disabled: {}",e.what());}
+    for(unsigned i=received;i<4;++i){release(sun_cascades[i].view);sun_cascades[i]={};}
+    if(received)sun_cascade_time=GetTickCount64();
+  }catch(const std::exception& e){disabled=true;clear_sun_cascades();spdlog::error("Mesh shadow casting disabled: {}",e.what());}
   ctx->GSSetShader(gs,nullptr,0);ctx->HSSetShader(hs,nullptr,0);ctx->DSSetShader(ds,nullptr,0);release(gs);release(hs);release(ds);backup.Restore(ctx);
-  static std::uint64_t last_log{};if(drawn && GetTickCount64()-last_log>10000){last_log=GetTickCount64();spdlog::info("Real car/ball shadows appended to {} native sun cascades",drawn);}
+  static std::uint64_t last_log{};if(GetTickCount64()-last_log>10000){last_log=GetTickCount64();spdlog::info("Native sun shadows: {} receiving cascades, {} car/ball casting cascades",received,drawn);}
 }
 struct ShadowHook {
   static void thunk(RE::BSShadowLight* light,std::uint32_t& index){original(light,index);draw_shadows(light);}
@@ -410,7 +469,7 @@ struct Hook { static void thunk(bool arg) {original(arg);draw();}static inline R
 void publish(bool active,const RE::NiTransform& car,const RE::NiTransform& ball,bool car_visible,bool ball_visible,bool boosting) {
   // Collect on Skyrim's main thread, then copy values to the render thread.
   static std::vector<LocalLight> lights;static std::uint64_t last_lights{};
-  static float sun_visibility[2]{1,1},sky_visibility[2]{1,1};static float brightness=1.0f;static bool cast_shadows=true;
+  static float sky_visibility[2]{1,1};static float brightness=1.0f;static bool cast_shadows=true,exterior=true;
   const auto now=GetTickCount64();
   if(active && now-last_lights>200){last_lights=now;lights.clear();
     cast_shadows=GetPrivateProfileIntA("Bridge","CastShadows",1,".\\Data\\SKSE\\Plugins\\SkyrimRocketBridge.ini")!=0;
@@ -418,7 +477,8 @@ void publish(bool active,const RE::NiTransform& car,const RE::NiTransform& ball,
     try{const float value=std::stof(setting);if(std::isfinite(value))brightness=std::clamp(value,.02f,3.0f);}catch(...){}
 
     auto* player=RE::PlayerCharacter::GetSingleton();auto* cell=player?player->GetParentCell():nullptr;
-    // Test real world geometry for sunlight and overhead shelter on the game thread.
+    exterior=cell && cell->IsExteriorCell();
+    // Approximate indirect ambient shelter only; direct sunlight uses per-pixel depth.
     auto* world=cell?cell->GetbhkWorld():nullptr;auto* native=world?world->GetWorld1():nullptr;
     if(native){
       const float scale=RE::bhkWorld::GetWorldScale();RE::BSReadLockGuard world_lock(world->worldLock);
@@ -432,12 +492,10 @@ void publish(bool active,const RE::NiTransform& car,const RE::NiTransform& ball,
           const auto remaining=end-start;const auto distance=remaining.Length();if(distance<2)return 1.0f;start=start+remaining*std::min(1.0f,pick.rayOutput.hitFraction+2/distance);
         }return 0.0f;
       };
-      RE::NiPoint3 sun_direction{.3f,-.4f,.85f};
-      if(auto* sky=RE::Sky::GetSingleton();sky && sky->sun && sky->sun->light){sun_direction=sky->sun->light->GetWorldDirection()*-1;const float length=sun_direction.Length();if(length>.001f)sun_direction=sun_direction/length;}
       for(int object=0;object<2;++object){auto origin=(object?ball:car).translate;origin.z+=object?20:30;
-        const float sun=visible(origin,sun_direction);float ambient=0;
+        float ambient=0;
         for(const auto direction:{RE::NiPoint3{0,0,1},RE::NiPoint3{.707f,0,.707f},RE::NiPoint3{-.707f,0,.707f},RE::NiPoint3{0,.707f,.707f},RE::NiPoint3{0,-.707f,.707f}})ambient+=visible(origin,direction)/5;
-        sun_visibility[object]=sun;sky_visibility[object]=.2f+.8f*ambient;
+        sky_visibility[object]=.2f+.8f*ambient;
       }
     }
     if(cell)cell->ForEachReference([&](RE::TESObjectREFR* ref){
@@ -450,7 +508,7 @@ void publish(bool active,const RE::NiTransform& car,const RE::NiTransform& ball,
       return RE::BSContainer::ForEachResult::kContinue;});
     std::sort(lights.begin(),lights.end(),[&](const auto& a,const auto& b){return (a.position-car.translate).Length()<(b.position-car.translate).Length();});if(lights.size()>8)lights.resize(8);
   }
-  std::lock_guard lock(pose_mutex);pose={active,car_visible,ball_visible,boosting,car,ball,lights,{sun_visibility[0],sun_visibility[1]},{sky_visibility[0],sky_visibility[1]},brightness,cast_shadows};
+  std::lock_guard lock(pose_mutex);pose={active,car_visible,ball_visible,boosting,car,ball,lights,{sky_visibility[0],sky_visibility[1]},brightness,cast_shadows,exterior};
 }
 bool available() { return ready.load(); }
 void install() {

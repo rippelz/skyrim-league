@@ -249,3 +249,8 @@ The stream-timing revision receives UDP packets on a dedicated thread and record
 ## Windows
 
 Native Windows setup, the browser launcher, Steam library discovery, session ownership and controller focus routing are implemented. See [WINDOWS.md](WINDOWS.md) for prerequisites, private visual-asset transfer, setup commands and native Visual Studio builds. `tools/package_windows.py` creates `dist/Skyrim-League-Windows.zip` with built plugins and sources. Windows executables and Python tests pass under headless Wine; real Windows gameplay validation is pending. The Linux running games are unchanged.
+
+
+### Partial shadow reception
+
+Direct sunlight now samples native directional cascade depth at each rendered fragment, rather than one Havok ray per car or ball. The receiver uses the same camera-relative projection as native mesh shadow casting, supports normal/reversed depth and single-slice array views, and filters nine depth comparisons to soften edges. Shadow views are reused across frames and all shader resource bindings are restored. The scene-depth screen-space mask remains unused. Missing/expired or incompatible cascades fall back to unoccluded sunlight rather than a whole-object shadow toggle. Interior cells omit direct sunlight; indirect ambient shelter is still approximated per object. Point-light shadow reception remains unsupported. The Windows ABI plugin and all four HLSL entry points were compiled; in-game appearance still needs live verification after a Skyrim restart.

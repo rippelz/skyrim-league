@@ -173,6 +173,7 @@ static_assert(sizeof(Constants)==944 && offsetof(Constants,sunTransform)==624 &&
 			ID3D11ShaderResourceView* vsAll[kSlots]{};
 			ID3D11ShaderResourceView* psAll[kSlots]{};
 			ID3D11ShaderResourceView* csAll[kSlots]{};
+			ID3D11ShaderResourceView* gsAll[kSlots]{},*hsAll[kSlots]{},*dsAll[kSlots]{};
 
 			void Save(ID3D11DeviceContext* a_c)
 			{
@@ -193,6 +194,7 @@ static_assert(sizeof(Constants)==944 && offsetof(Constants,sunTransform)==624 &&
 				a_c->VSGetShaderResources(0, kSlots, vsAll);
 				a_c->PSGetShaderResources(0, kSlots, psAll);
 				a_c->CSGetShaderResources(0, kSlots, csAll);
+				a_c->GSGetShaderResources(0,kSlots,gsAll);a_c->HSGetShaderResources(0,kSlots,hsAll);a_c->DSGetShaderResources(0,kSlots,dsAll);
 			}
 
 			void Restore(ID3D11DeviceContext* a_c)
@@ -214,7 +216,8 @@ static_assert(sizeof(Constants)==944 && offsetof(Constants,sunTransform)==624 &&
 				a_c->VSSetShaderResources(0, kSlots, vsAll);
 				a_c->PSSetShaderResources(0, kSlots, psAll);
 				a_c->CSSetShaderResources(0, kSlots, csAll);
-				for (auto* list : { vsAll, psAll, csAll }) {
+				a_c->GSSetShaderResources(0,kSlots,gsAll);a_c->HSSetShaderResources(0,kSlots,hsAll);a_c->DSSetShaderResources(0,kSlots,dsAll);
+				for (auto* list : { vsAll, psAll, csAll, gsAll, hsAll, dsAll }) {
 					for (UINT k = 0; k < kSlots; ++k) {
 						if (list[k]) {
 							list[k]->Release();
@@ -385,7 +388,35 @@ void draw() {
       ctx->UpdateSubresource(constants,0,nullptr,&c,0,0);ctx->PSSetShader(boost_ps,nullptr,0);ctx->OMSetBlendState(boost_blend,nullptr,0xffffffff);ctx->OMSetDepthStencilState(reversed?boost_depth_reverse:boost_depth_normal,0);
       UINT stride=sizeof(Vertex),offset=0;ctx->IASetVertexBuffers(0,1,&boost_vertices,&stride,&offset);ctx->PSSetShaderResources(0,1,&boost_texture);ctx->Draw(boost_count,0);
     }
+    // The opaque world has already resolved its depth. Stamp only our solid
+    // meshes into each compatible copy used by soft particles/refraction/DOF.
+    // Do not replace an entire copy: native water and prepass depth differ.
+    unsigned depth_copies{};
+    const auto& primary_depth=renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
+    auto* primary_texture=reinterpret_cast<ID3D11Texture2D*>(primary_depth.texture);
+    D3D11_TEXTURE2D_DESC primary_desc{};if(primary_texture)primary_texture->GetDesc(&primary_desc);
+    ctx->VSSetShader(shadow_vs,nullptr,0);ctx->PSSetShader(nullptr,nullptr,0);
+    ctx->OMSetDepthStencilState(reversed?depth_reverse:depth_normal,0);ctx->OMSetBlendState(blend,nullptr,0xffffffff);
+    for(const auto target:{RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN_COPY,RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY,RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_WATER_COPY}){
+      const auto& copy=renderer->GetDepthStencilData().depthStencils[target];
+      auto* copy_texture=reinterpret_cast<ID3D11Texture2D*>(copy.texture);auto* copy_view=reinterpret_cast<ID3D11DepthStencilView*>(copy.views[0]);
+      if(!copy_texture || !copy_view || !primary_texture || copy_texture==primary_texture)continue;
+      D3D11_TEXTURE2D_DESC desc{};copy_texture->GetDesc(&desc);
+      if(desc.Width!=td.Width || desc.Height!=td.Height || desc.SampleDesc.Count!=primary_desc.SampleDesc.Count || desc.SampleDesc.Quality!=primary_desc.SampleDesc.Quality)continue;
+      D3D11_DEPTH_STENCIL_VIEW_DESC view_desc{};copy_view->GetDesc(&view_desc);ID3D11DepthStencilView* writable{};
+      if(view_desc.Flags&D3D11_DSV_READ_ONLY_DEPTH){view_desc.Flags=0;if(FAILED(device->CreateDepthStencilView(copy_texture,&view_desc,&writable)))continue;}
+      auto* target_view=writable?writable:copy_view;ctx->OMSetRenderTargets(0,nullptr,target_view);
+      for(const auto& mesh:meshes){
+        if(!(mesh.ball?current.ball_visible:current.car_visible))continue;
+        const auto& object=mesh.ball?current.ball:current.car;
+        for(int r=0;r<3;++r)for(int col=0;col<3;++col)c.model[r][col]=object.rotate.entry[r][col]*object.scale;
+        c.model[0][3]=object.translate.x-cam.x;c.model[1][3]=object.translate.y-cam.y;c.model[2][3]=object.translate.z-cam.z;c.model[3][3]=1;
+        ctx->UpdateSubresource(constants,0,nullptr,&c,0,0);UINT stride=sizeof(Vertex),offset=0;ctx->IASetVertexBuffers(0,1,&mesh.vertices,&stride,&offset);ctx->Draw(mesh.count,0);
+      }
+      release(writable);++depth_copies;
+    }
     ctx->GSSetShader(gs,nullptr,0);ctx->HSSetShader(hs,nullptr,0);ctx->DSSetShader(ds,nullptr,0);release(gs);release(hs);release(ds);backup.Restore(ctx);
+    static std::uint64_t depth_log{};if(GetTickCount64()-depth_log>10000){depth_log=GetTickCount64();spdlog::info("Bridge solid meshes added to {} native particle depth copies",depth_copies);}
     static std::uint64_t light_log{};if(GetTickCount64()-light_log>10000){light_log=GetTickCount64();spdlog::info("Bridge lighting: sun {} {} {} ambient-up {} {} {} sky visibility {} {} brightness {} sun cascades {}",c.sunColor[0],c.sunColor[1],c.sunColor[2],c.ambient[4][0],c.ambient[4][1],c.ambient[4][2],current.sky_visibility[0],current.sky_visibility[1],current.brightness,c.renderParams[3]);}
     static bool logged=false;if(!logged) {logged=true;spdlog::info("Direct mesh draw: scene {}x{} format {} reversed depth {}",td.Width,td.Height,static_cast<unsigned>(td.Format),reversed);}
   } catch(const std::exception& e) {failed=true;ready.store(false);spdlog::error("Direct mesh renderer disabled: {}",e.what());}
@@ -464,14 +495,14 @@ struct ShadowHook {
   static void thunk(RE::BSShadowLight* light,std::uint32_t& index){original(light,index);draw_shadows(light);}
   static inline REL::Relocation<decltype(thunk)> original;
 };
-// Draw opaque bridge meshes after Skyrim's opaque accumulation but before the
-// engine resolves/copies depth and renders transparent particles. RenderWorld's
-// return is too late: fire already in the HDR target gets painted over there.
+// Draw after native opaque shading/depth resolve, before late transparent
+// effects. Drawing before depth resolve lets native shading use bridge depth
+// with unrelated world normals/materials; after RenderWorld overwrites fire.
 thread_local bool in_world{},world_drawn{};
-struct OpaqueHook {
+struct TransparentHook {
   static void thunk(RE::NiCamera* camera,void* accumulator,std::uint32_t flags){
-    original(camera,accumulator,flags);
     if(in_world && !world_drawn && camera==RE::Main::WorldRootCamera()){draw();world_drawn=true;}
+    original(camera,accumulator,flags);
   }
   static inline REL::Relocation<decltype(thunk)> original;
 };
@@ -536,8 +567,8 @@ void install() {
   const auto target=REL::ID(107142).address();const auto text=REL::Module::get().segment(REL::Segment::textx);const auto* code=reinterpret_cast<const std::uint8_t*>(text.address());unsigned count=0;
   for(std::size_t i=0;i+5<=text.size();++i) {if(code[i]!=0xe8)continue;std::int32_t offset;std::memcpy(&offset,code+i+1,4);if(text.address()+i+5+static_cast<std::intptr_t>(offset)==target) {Hook::original=SKSE::GetTrampoline().write_call<5>(text.address()+i,Hook::thunk);++count;}}
   // Resolve IDs on each runtime; do not use SkyCraft's older fixed +0x2DF offset.
-  // 1.7.104 has the pre-resolve call at RenderWorld+0x11F and the late call at
-  // +0x2DF. Its wrapper takes camera, accumulator and uint32 flags in RCX/RDX/R8.
+  // Validate that the pre-resolve call precedes the late call; hook the latter
+  // BEFORE invoking it. Its wrapper takes camera/accumulator/flags in RCX/RDX/R8.
   const auto opaque_target=REL::ID(106437).address(),late_target=REL::ID(106438).address();
   std::vector<std::uintptr_t> opaque_sites,late_sites;
   const auto end=std::min(target+std::uintptr_t(0x800),text.address()+text.size());
@@ -547,9 +578,9 @@ void install() {
     if(called==opaque_target)opaque_sites.push_back(site);if(called==late_target)late_sites.push_back(site);
   }
   if(count && opaque_sites.size()==1 && late_sites.size()==1 && opaque_sites[0]<late_sites[0]){
-    OpaqueHook::original=SKSE::GetTrampoline().write_call<5>(opaque_sites[0],OpaqueHook::thunk);
-    spdlog::info("Bridge meshes render before depth resolve and transparent effects; opaque stage offset {:X}",opaque_sites[0]-target);
-  }else spdlog::warn("Opaque-stage hook unavailable/ambiguous; retaining late bridge draw (particle ordering remains limited)");
+    TransparentHook::original=SKSE::GetTrampoline().write_call<5>(late_sites[0],TransparentHook::thunk);
+    spdlog::info("Bridge meshes render after opaque shading/depth resolve, before transparent effects; late stage offset {:X}",late_sites[0]-target);
+  }else spdlog::warn("Transparent-stage hook unavailable/ambiguous; retaining end-of-world bridge draw (particle ordering remains limited)");
   REL::Relocation<std::uintptr_t> sun{RE::VTABLE_BSShadowDirectionalLight[0]};
   ShadowHook::original=sun.write_vfunc(0x0A,ShadowHook::thunk);
   spdlog::info("Native sun shadow hook installed; actual car and ball geometry");

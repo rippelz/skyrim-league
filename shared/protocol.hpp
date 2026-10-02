@@ -16,7 +16,7 @@ enum Flag : std::uint32_t {
   CarValid = 1, BallValid = 2, CameraValid = 4, OnGround = 8,
   Supersonic = 16, Demolished = 32, Boosting = 64
 };
-enum class EventType : std::uint32_t { SetBall = 1, TeleportCar = 2, BumpCar = 3, CarSurface = 4, BallSurface = 5, BridgeActive = 6, Wheel0 = 7, Wheel1 = 8, Wheel2 = 9, Wheel3 = 10, WheelMiss0 = 11, WheelMiss1 = 12, WheelMiss2 = 13, WheelMiss3 = 14, BumpBall = 15, Interact = 16, PauseDriving = 17, ActorContactCar = 18, ActorContactBall = 19 };
+enum class EventType : std::uint32_t { SetBall = 1, TeleportCar = 2, BumpCar = 3, CarSurface = 4, BallSurface = 5, BridgeActive = 6, Wheel0 = 7, Wheel1 = 8, Wheel2 = 9, Wheel3 = 10, WheelMiss0 = 11, WheelMiss1 = 12, WheelMiss2 = 13, WheelMiss3 = 14, BumpBall = 15, Interact = 16, PauseDriving = 17, ActorContactCar = 18, ActorContactBall = 19, CarMenuInput = 20 };
 #pragma pack(push, 1)
 struct Vec3 { float x{}, y{}, z{}; };
 struct Quat { float x{}, y{}, z{}, w{1}; };
@@ -65,7 +65,12 @@ inline bool valid(const StatePacket& p) {
 }
 inline bool valid(const EventPacket& p) {
   const auto type = static_cast<std::uint32_t>(p.type);
-  return valid(p.header, Kind::Event, sizeof p) && type >= 1 && type <= 19 &&
+  // Optional car-menu input: normalized left stick, exact XInput button mask,
+  // and velocity.x=-1 for a disconnected pad (0 otherwise).
+  if(p.type==EventType::CarMenuInput && (!finite(p.position.x,1) || !finite(p.position.y,1) ||
+      !finite(p.position.z,65535) || p.position.z<0 || std::floor(p.position.z)!=p.position.z ||
+      (p.velocity.x!=0 && p.velocity.x!=-1) || p.velocity.y!=0 || p.velocity.z!=0))return false;
+  return valid(p.header, Kind::Event, sizeof p) && type >= 1 && type <= 20 &&
     valid(p.position) && valid(p.velocity, 1e5f) && valid(p.rotation);
 }
 template<class Packet> bool decode(const void* data, std::size_t size, Packet& out) {

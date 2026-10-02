@@ -54,6 +54,7 @@ class RocketSkyrim : public BakkesMod::Plugin::BakkesModPlugin {
   float background_look_right_{};
   std::uint64_t swivel_log_{};
   WORD previous_buttons_{};
+  bridge::Vec3 menu_pad_{};bool menu_pad_connected_{};
   std::uint64_t input_log_{},binding_refresh_{};
   std::vector<std::pair<std::string,std::string>> pad_bindings_;
   GamepadSettings pad_settings_{};
@@ -81,12 +82,15 @@ class RocketSkyrim : public BakkesMod::Plugin::BakkesModPlugin {
       bridge::now_us()-last_feedback_<3000000 && native_terrain_.applied();
     if(active!=background_input_){background_input_=active;if(!active)background_look_right_=0;
       cvarManager->log(std::string("RocketSkyrim background controller ")+(active?"enabled":"disabled"));}
+    menu_pad_connected_=false;
     if(!poll_pad_ || !native_terrain_.applied())return;
     XINPUT_STATE state{};DWORD status=ERROR_DEVICE_NOT_CONNECTED;int index=-1;
     for(DWORD i=0;i<4;++i)if((status=poll_pad_(i,&state))==ERROR_SUCCESS){index=static_cast<int>(i);break;}
     if(bridge::now_us()-input_log_>1000000){input_log_=bridge::now_us();
       cvarManager->log("RocketSkyrim background pad="+std::to_string(index)+" buttons="+std::to_string(state.Gamepad.wButtons)+
         " RT="+std::to_string(state.Gamepad.bRightTrigger)+" LT="+std::to_string(state.Gamepad.bLeftTrigger)+" paused="+std::to_string(driving_paused_)+" routing="+std::to_string(active));}
+    menu_pad_connected_=status==ERROR_SUCCESS;
+    if(menu_pad_connected_)menu_pad_={std::clamp(state.Gamepad.sThumbLX/32767.f,-1.f,1.f),std::clamp(state.Gamepad.sThumbLY/32767.f,-1.f,1.f),float(state.Gamepad.wButtons)};
     auto pc=gameWrapper->GetPlayerController();if(pc.IsNull())return;
     if(bridge::now_us()-binding_refresh_>2000000){binding_refresh_=bridge::now_us();auto settings=gameWrapper->GetSettings();
       pad_bindings_=settings.GetAllGamepadBindings();pad_settings_=settings.GetGamepadSettings();
@@ -398,6 +402,8 @@ class RocketSkyrim : public BakkesMod::Plugin::BakkesModPlugin {
       return;
     }
     socket_.send(&p,sizeof p,static_cast<std::uint16_t>(cvarManager->getCvar("sb_state_port").getIntValue()));
+    if(bridge::now_us()-last_feedback_<3000000){bridge::EventPacket e{};e.header=p.header;e.header.kind=bridge::Kind::Event;e.header.bytes=sizeof e;e.type=bridge::EventType::CarMenuInput;e.target_sequence=p.header.sequence;e.position=menu_pad_connected_?menu_pad_:bridge::Vec3{};e.velocity.x=menu_pad_connected_?0.f:-1.f;
+      socket_.send(&e,sizeof e,static_cast<std::uint16_t>(cvarManager->getCvar("sb_state_port").getIntValue()));}
     if(interaction_pending_){bridge::EventPacket e{};e.header=p.header;e.header.kind=bridge::Kind::Event;e.header.bytes=sizeof e;e.type=bridge::EventType::Interact;e.target_sequence=p.header.sequence;
       socket_.send(&e,sizeof e,static_cast<std::uint16_t>(cvarManager->getCvar("sb_state_port").getIntValue()));interaction_pending_=false;}
     wheels(car,p);

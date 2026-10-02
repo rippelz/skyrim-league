@@ -1,5 +1,6 @@
 #include "shared/timeline.hpp"
 #include "shared/terrain_mesh.hpp"
+#include "shared/car_menu.hpp"
 #include "shared/actor_impact.hpp"
 #include "shared/shadow_projection.hpp"
 #include "shared/udp.hpp"
@@ -17,6 +18,24 @@ StatePacket state(std::uint32_t seq,std::uint64_t time,std::uint64_t session=7) 
   return p;
 }
 int main(int argc,char** argv) {
+  {
+    car_menu::State wheel;using Action=car_menu::Action;
+    require(wheel.input(0,0,car_menu::right_click)==Action::Open && wheel.open,"right stick click did not open car wheel");
+    require(wheel.input(0,0,car_menu::right_click)==Action::None && wheel.open,"held stick click toggled wheel repeatedly");
+    wheel.input(0,0,0);require(wheel.input(0,0,car_menu::confirm)==Action::None && wheel.open,"neutral confirmation picked an unintended menu");
+    for(int i=0;i<8;++i){const float angle=i*kPi/4;wheel.input(std::sin(angle),std::cos(angle),0);require(wheel.selected==i,"radial stick sector incorrect");}
+    require(wheel.input(0,0,car_menu::confirm)==Action::Select && wheel.selected==7 && !wheel.open,"radial confirmation lost selected menu");
+    wheel.input(0,0,0);wheel.input(0,0,car_menu::right_click);wheel.input(0,0,0);
+    wheel.input(0,0,1);require(wheel.selected==0,"D-pad up selection incorrect");
+    wheel.input(0,0,8);require(wheel.selected==2,"D-pad right selection incorrect");
+    wheel.input(0,0,2);require(wheel.selected==4,"D-pad down selection incorrect");
+    wheel.input(0,0,4);require(wheel.selected==6,"D-pad left selection incorrect");
+    require(wheel.input(0,0,car_menu::cancel)==Action::Close && !wheel.open,"cancel did not close car wheel");
+    wheel.input(0,0,0);require(wheel.input(0,0,car_menu::right_click,true)==Action::None && !wheel.open,"native menu allowed car wheel to open");
+    require(wheel.input(0,0,car_menu::right_click)==Action::None && !wheel.open,"held click reopened wheel after native menu");
+    wheel.input(0,0,0);wheel.input(0,0,car_menu::right_click);
+    require(wheel.input(0,0,0,true)==Action::Close && !wheel.open,"external menu did not dismiss car wheel");
+  }
   const float sun_uv[4][4]={{.01f,0,0,0},{0,.02f,0,0},{0,0,.001f,0},{.5f,.5f,.25f,1}};
   float sun_clip[4][4]{};
   require(shadow_clip_matrix(sun_uv,{10,20,30},sun_clip),"sun projection rejected");
@@ -75,7 +94,11 @@ int main(int argc,char** argv) {
   surface.type=EventType::WheelMiss3;require(valid(surface),"wheel miss rejected");
   surface.type=EventType::ActorContactCar;require(valid(surface),"car actor contact rejected");
   surface.type=EventType::ActorContactBall;require(valid(surface),"ball actor contact rejected");
-  surface.type=static_cast<EventType>(20);require(!valid(surface),"unknown contact type accepted");
+  surface.type=EventType::CarMenuInput;surface.velocity={};surface.position={-.8f,.4f,65535};require(decode(&surface,sizeof surface,surface_decoded),"car wheel controller packet rejected");
+  surface.position.x=1.1f;require(!valid(surface),"car wheel accepted invalid stick range");surface.position.x=0;
+  surface.position.z=1.5f;require(!valid(surface),"car wheel accepted fractional buttons");surface.position.z=0;
+  surface.velocity={-1,0,0};require(valid(surface),"disconnected controller packet rejected");
+  surface.type=static_cast<EventType>(21);require(!valid(surface),"unknown contact type accepted");
   auto boosted=p;boosted.flags|=Boosting;require(valid(boosted),"boost flag rejected");
   Transform t;t.rl_origin={100,-50,17};t.sky_origin={-9000,3000,70};t.yaw=0.71f;
   require(near(t.inverse_position(t.position({1000,20,350})),{1000,20,350}),"position roundtrip broken");

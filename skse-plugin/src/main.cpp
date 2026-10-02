@@ -1,4 +1,5 @@
 #include "DirectRender.hpp"
+#include "CarMenu.hpp"
 #include "TerrainExport.hpp"
 #include "RE/B/BSFadeNode.h"
 #include "RE/B/BSTriShape.h"
@@ -110,14 +111,20 @@ Vec3 last_terrain_position{};
 std::unordered_map<RE::FormID,std::uint64_t> npc_hits;
 struct PendingLaunch {RE::ActorHandle actor;Vec3 velocity;std::uint64_t ready,expires;};
 std::vector<PendingLaunch> npc_launches;
-StatePacket previous_impact{};bool have_previous_impact{},interaction_requested{},resume_after_world{};
+StatePacket previous_impact{};bool have_previous_impact{},interaction_requested{},resume_after_world{},reanchor_after_loading{};
+std::unordered_set<std::string> blocking_menus;
+std::uint64_t menu_input_session{},menu_input_time{};
 
 
-bool menu() {
+bool native_menu() {
   auto* ui=RE::UI::GetSingleton();
-  return !ui || ui->GameIsPaused() || ui->IsModalMenuOpen() || ui->IsMenuOpen("Console") ||
-    ui->IsMenuOpen("Loading Menu") || ui->IsMenuOpen("Main Menu") || ui->IsMenuOpen("Dialogue Menu");
+  return !ui || !blocking_menus.empty() || ui->IsApplicationMenuOpen() || ui->IsItemMenuOpen() || ui->GameIsPaused() || ui->IsModalMenuOpen() || ui->IsMenuOpen("Console") ||
+    ui->IsMenuOpen("Loading Menu") || ui->IsMenuOpen("Main Menu") || ui->IsMenuOpen("Dialogue Menu") ||
+    ui->IsMenuOpen("FavoritesMenu") || ui->IsMenuOpen("InventoryMenu") || ui->IsMenuOpen("MagicMenu") ||
+    ui->IsMenuOpen("MapMenu") || ui->IsMenuOpen("StatsMenu") || ui->IsMenuOpen("TweenMenu") ||
+    ui->IsMenuOpen("Journal Menu") || ui->IsMenuOpen("Sleep/Wait Menu");
 }
+bool menu(){return car_menu::busy() || native_menu();}
 void suppress_survival_prompt() {
   if (!cfg.suppress_survival_prompt) return;
   auto* data=RE::TESDataHandler::GetSingleton();
@@ -150,6 +157,7 @@ void hide_player(RE::PlayerCharacter* player) {
   }
 }
 void stop(bool restore_position=true) {
+  car_menu::close();
   if (!active) { camera_ready=false;detach(car_node);detach(ball_node);return; }
   send_event(EventType::PauseDriving,{},{});conversation_target={};
   active=false;camera_ready=false;direct_render::publish(false,{},{},false,false);
@@ -244,7 +252,7 @@ void start() {
   saved_fov=cam->GetRuntimeData2().worldFOV;saved_first_fov=cam->GetRuntimeData2().firstPersonFOV;saved_vanity=cam->GetRuntimeData2().allowAutoVanityMode;
   anchor();tes->objRoot->AttachChild(car_node.get());tes->objRoot->AttachChild(ball_node.get());
   player->SetCollision(false);cam->GetRuntimeData2().allowAutoVanityMode=false;cam->ForceThirdPerson();
-  active=true;RE::SendHUDMessage::ShowHUDMessage("Rocket bridge on; F8 exit, F9 anchor, F10 reset ball");
+  active=true;reanchor_after_loading=false;RE::SendHUDMessage::ShowHUDMessage("Rocket bridge on; F8 exit, F9 anchor, F10 reset ball");
 }
 void send_event(EventType type,Vec3 pos,Vec3 velocity,Quat rotation) {
   const auto* last=timeline.latest();if (!last) return;
@@ -410,14 +418,19 @@ void interact() {
     const auto* name=ref->GetDisplayFullName();if(!name || !*name)return RE::BSContainer::ForEachResult::kContinue;
     auto* base=ref->GetBaseObject();if(!base)return RE::BSContainer::ForEachResult::kContinue;
     const auto type=base->GetFormType();
-    if(type!=RE::FormType::NPC && type!=RE::FormType::Door && type!=RE::FormType::Container && type!=RE::FormType::Activator && type!=RE::FormType::Furniture)return RE::BSContainer::ForEachResult::kContinue;
+    switch(type){
+      case RE::FormType::NPC:case RE::FormType::Door:case RE::FormType::Container:case RE::FormType::Activator:case RE::FormType::Furniture:
+      case RE::FormType::Weapon:case RE::FormType::Armor:case RE::FormType::Ammo:case RE::FormType::Book:case RE::FormType::Scroll:
+      case RE::FormType::AlchemyItem:case RE::FormType::Ingredient:case RE::FormType::Misc:case RE::FormType::KeyMaster:case RE::FormType::SoulGem:case RE::FormType::Flora:break;
+      default:return RE::BSContainer::ForEachResult::kContinue;
+    }
     const auto delta=vec(ref->GetPosition())-position;const auto distance=length(delta);
     if(distance>240 || distance<1 || dot(delta,forward)/distance<-.2f)return RE::BSContainer::ForEachResult::kContinue;
     const float score=distance-(type==RE::FormType::NPC?60.0f:0.0f);
     if(score<best){best=score;target=ref;}return RE::BSContainer::ForEachResult::kContinue;
   });
   if(target){conversation_target=target->CreateRefHandle();spdlog::info("Car interaction {:08X} {}",target->GetFormID(),target->GetDisplayFullName());target->ActivateRef(player,0,nullptr,1,false);}
-  else RE::SendHUDMessage::ShowHUDMessage("Car: move closer to someone or something, then press E");
+  else RE::SendHUDMessage::ShowHUDMessage("Car: move closer to someone or something, then press B / Circle or E");
 }
 void frame(RE::PlayerCharacter* player) {
   const auto batch=receiver.drain();
@@ -427,7 +440,13 @@ void frame(RE::PlayerCharacter* player) {
     if(packet.is_state) timeline.push(packet.state,packet.receipt);
     else {
       const auto& probe=packet.event;const auto type=static_cast<unsigned>(probe.type);
-      if(probe.type==EventType::Interact && timeline.latest() && probe.header.session==timeline.latest()->header.session)interaction_requested=true;
+      if(probe.type==EventType::CarMenuInput && timeline.latest() && probe.header.session==timeline.latest()->header.session && now>=packet.receipt && now-packet.receipt<150000 && probe.position.z>=0 && probe.position.z<=65535){
+        if(menu_input_session!=probe.header.session){menu_input_session=probe.header.session;menu_input_time=0;car_menu::close();}
+        if(probe.header.timestamp_us>menu_input_time){menu_input_time=probe.header.timestamp_us;
+          car_menu::input(probe.position.x,probe.position.y,static_cast<std::uint16_t>(probe.position.z),!active || native_menu() || probe.velocity.x<0);
+        }
+      }
+      else if(probe.type==EventType::Interact && !car_menu::busy() && timeline.latest() && probe.header.session==timeline.latest()->header.session)interaction_requested=true;
       else if(type>=7 && type<=10 && length(probe.velocity)<300) {wheel_probes[type-7]=probe;wheel_probe_times[type-7]=packet.receipt;}
     }
   }
@@ -435,8 +454,9 @@ void frame(RE::PlayerCharacter* player) {
     last_auto_attempt=now;start();
   }
   if(!active && resume_after_world && !menu() && timeline.sample(now,0,cfg.timeout)){resume_after_world=false;start();}
+  car_menu::tick();
   if (!active) return;
-  if (menu()) {send_event(EventType::BridgeActive,{},{});send_event(EventType::PauseDriving,{},{1,0,0});camera_ready=false;return;}
+  if (menu()) {interaction_requested=false;send_event(EventType::BridgeActive,{},{});send_event(EventType::PauseDriving,{},{1,0,0});camera_ready=false;return;}
   send_event(EventType::PauseDriving,{},{});
   if(interaction_requested){interaction_requested=false;interact();if(menu())return;}
   const auto p=timeline.sample(now,cfg.delay,cfg.timeout);
@@ -445,6 +465,7 @@ void frame(RE::PlayerCharacter* player) {
     stop();RE::SendHUDMessage::ShowHUDMessage("Rocket bridge stopped: stream lost or player unavailable");return;
   }
   if (player->GetWorldspace()!=saved_world || (!saved_world && player->GetParentCell()!=saved_cell)) { stop(false);resume_after_world=true;return; }
+  if(reanchor_after_loading){reanchor_after_loading=false;anchor();send_event(EventType::TeleportCar,p->car.position,{},p->car.rotation);}
   const auto car_pos=transform.position(p->car.position);
   if (cfg.max_range>0 && length(car_pos-transform.sky_origin)>cfg.max_range) {
     stop();RE::SendHUDMessage::ShowHUDMessage("Rocket bridge: calibration range exceeded; re-anchor in a new area");return;
@@ -545,7 +566,7 @@ struct CameraUpdate {
 };
 struct Controls {
   static RE::BSEventNotifyControl thunk(RE::PlayerControls* self,RE::InputEvent* const* event,RE::BSTEventSource<RE::InputEvent*>* source) {
-    if (active && !menu()) return RE::BSEventNotifyControl::kContinue;
+    if (active && (car_menu::busy() || !native_menu())) return RE::BSEventNotifyControl::kContinue;
     return original(self,event,source);
   }
   static inline REL::Relocation<decltype(thunk)> original;
@@ -553,7 +574,8 @@ struct Controls {
 // Menu controls get gamepad events only while a Skyrim UI is open.
 struct MenuInput {
   static RE::BSEventNotifyControl thunk(RE::MenuControls* self,RE::InputEvent* const* events,RE::BSTEventSource<RE::InputEvent*>* source){
-    if(!active || menu() || !events)return original(self,events,source);
+    if(active && car_menu::busy())return RE::BSEventNotifyControl::kContinue;
+    if(!active || native_menu() || !events)return original(self,events,source);
     std::vector<std::pair<RE::InputEvent*,RE::InputEvent*>> links;RE::InputEvent* first=nullptr;RE::InputEvent* tail=nullptr;
     for(auto* e=*events;e;e=e->next){links.emplace_back(e,e->next);if(e->device.get()==RE::INPUT_DEVICE::kGamepad)continue;if(tail)tail->next=e;else first=e;tail=e;}
     if(tail)tail->next=nullptr;
@@ -564,13 +586,14 @@ struct MenuInput {
   static inline REL::Relocation<decltype(thunk)> original;
 };
 struct MenuEvents : RE::BSTEventSink<RE::MenuOpenCloseEvent> {
-  std::unordered_set<std::string> blocking;
   RE::BSEventNotifyControl ProcessEvent(const RE::MenuOpenCloseEvent* e,RE::BSTEventSource<RE::MenuOpenCloseEvent>*) override{
     if(!e)return RE::BSEventNotifyControl::kContinue;
     const std::string name=e->menuName.c_str();
-    if(name=="Dialogue Menu" || name=="InventoryMenu" || name=="ContainerMenu" || name=="BarterMenu" || name=="Console" || name=="Loading Menu" || name=="Main Menu" || name=="TweenMenu" || name=="MapMenu" || name=="StatsMenu" || name=="Journal Menu" || name=="MessageBoxMenu" || name=="MagicMenu" || name=="FavoritesMenu"){
-      if(e->opening)blocking.insert(name);else blocking.erase(name);
-      if(active){send_event(EventType::BridgeActive,{},{});send_event(EventType::PauseDriving,{}, {blocking.empty()?0.0f:1.0f,0,0});}
+    auto* ui=RE::UI::GetSingleton();auto native=ui?ui->GetMenu(name):nullptr;
+    const bool interactive=native && (native->UsesMenuContext() || native->PausesGame() || native->Modal());
+    if(interactive || blocking_menus.contains(name) || name=="Dialogue Menu" || name=="InventoryMenu" || name=="ContainerMenu" || name=="BarterMenu" || name=="Console" || name=="Loading Menu" || name=="Main Menu" || name=="TweenMenu" || name=="MapMenu" || name=="StatsMenu" || name=="Journal Menu" || name=="MessageBoxMenu" || name=="MagicMenu" || name=="FavoritesMenu" || name=="Sleep/Wait Menu"){
+      if(e->opening){car_menu::native_opened();blocking_menus.insert(name);if(name=="Loading Menu" && active)reanchor_after_loading=true;}else blocking_menus.erase(name);
+      if(active){send_event(EventType::BridgeActive,{},{});send_event(EventType::PauseDriving,{}, {blocking_menus.empty()?0.0f:1.0f,0,0});}
       if(name=="Dialogue Menu" && !e->opening)conversation_target={};
     }
     return RE::BSEventNotifyControl::kContinue;
@@ -578,7 +601,12 @@ struct MenuEvents : RE::BSTEventSink<RE::MenuOpenCloseEvent> {
 } menu_events;
 struct Input : RE::BSTEventSink<RE::InputEvent*> {
   RE::BSEventNotifyControl ProcessEvent(RE::InputEvent* const* events,RE::BSTEventSource<RE::InputEvent*>*) override {
-    if (!events || menu()) return RE::BSEventNotifyControl::kContinue;
+    if(!events)return RE::BSEventNotifyControl::kContinue;
+    if(car_menu::busy()){
+      for(auto* event=*events;event;event=event->next)if(auto* button=event->AsButtonEvent();button && button->device.get()==RE::INPUT_DEVICE::kKeyboard && button->IsDown() && button->GetIDCode()==1)car_menu::close();
+      return RE::BSEventNotifyControl::kContinue;
+    }
+    if(menu())return RE::BSEventNotifyControl::kContinue;
     for (auto* event=*events;event;event=event->next) {
       auto* button=event->AsButtonEvent();
       if (!button || button->device.get()!=RE::INPUT_DEVICE::kKeyboard || !button->IsDown()) continue;

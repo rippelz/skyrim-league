@@ -29,7 +29,7 @@ Installation and launch reject unsupported versions. New game/BakkesMod releases
 1. Keep Steam signed in. Start the games through **Skyrim League**: `bridge-ui.cmd` on Windows or `./bridge-ui.sh` on Linux.
 2. Enter offline Free Play in Rocket League and load a Skyrim save in an open area.
 3. Press **F8** to anchor the car to your Skyrim position and activate the bridge.
-4. Drive with your normal RL controller bindings. Open Skyrim menus to use their normal controller controls.
+4. Drive with your normal RL controller bindings. Click RS/R3 for the car menu wheel, choose with the left stick or D-pad, and press A/Cross to select or B/Circle to cancel. Driving pauses while the wheel or a Skyrim menu is open. Native menus use their normal controller controls. B/Circle (or E) talks, uses objects, reads books, harvests plants and picks up nearby items.
 
 | Control | Action |
 |---|---|

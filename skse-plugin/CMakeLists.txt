@@ -25,7 +25,7 @@ else()
 endif()
 include("${COMMONLIB_ROOT}/cmake/CommonLibSSE.cmake")
 add_commonlibsse_plugin(SkyrimRocketBridge NAME "SkyrimRocketBridge" AUTHOR "RocketSkyrimBridge contributors"
-  USE_ADDRESS_LIBRARY SOURCES src/main.cpp src/DirectRender.cpp src/TerrainExport.cpp)
+  USE_ADDRESS_LIBRARY SOURCES src/main.cpp src/DirectRender.cpp src/TerrainExport.cpp src/CarMenu.cpp)
 target_link_libraries(SkyrimRocketBridge PRIVATE bridge_shared)
 target_compile_definitions(SkyrimRocketBridge PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(SkyrimRocketBridge PRIVATE /EHsc /W4 /Zc:preprocessor /utf-8)

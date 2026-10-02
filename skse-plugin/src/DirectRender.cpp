@@ -464,7 +464,28 @@ struct ShadowHook {
   static void thunk(RE::BSShadowLight* light,std::uint32_t& index){original(light,index);draw_shadows(light);}
   static inline REL::Relocation<decltype(thunk)> original;
 };
-struct Hook { static void thunk(bool arg) {original(arg);draw();}static inline REL::Relocation<decltype(thunk)> original; };
+// Draw opaque bridge meshes after Skyrim's opaque accumulation but before the
+// engine resolves/copies depth and renders transparent particles. RenderWorld's
+// return is too late: fire already in the HDR target gets painted over there.
+thread_local bool in_world{},world_drawn{};
+struct OpaqueHook {
+  static void thunk(RE::NiCamera* camera,void* accumulator,std::uint32_t flags){
+    original(camera,accumulator,flags);
+    if(in_world && !world_drawn && camera==RE::Main::WorldRootCamera()){draw();world_drawn=true;}
+  }
+  static inline REL::Relocation<decltype(thunk)> original;
+};
+struct Hook {
+  static void thunk(bool arg){
+    const bool previous_world=in_world,previous_drawn=world_drawn;in_world=true;world_drawn=false;
+    original(arg);
+    // Keep the original visibility fallback if this runtime lacks the expected
+    // opaque-stage call; never draw the meshes twice in one world pass.
+    if(!world_drawn)draw();
+    in_world=previous_world;world_drawn=previous_drawn;
+  }
+  static inline REL::Relocation<decltype(thunk)> original;
+};
 }
 void publish(bool active,const RE::NiTransform& car,const RE::NiTransform& ball,bool car_visible,bool ball_visible,bool boosting) {
   // Collect on Skyrim's main thread, then copy values to the render thread.
@@ -514,6 +535,21 @@ bool available() { return ready.load(); }
 void install() {
   const auto target=REL::ID(107142).address();const auto text=REL::Module::get().segment(REL::Segment::textx);const auto* code=reinterpret_cast<const std::uint8_t*>(text.address());unsigned count=0;
   for(std::size_t i=0;i+5<=text.size();++i) {if(code[i]!=0xe8)continue;std::int32_t offset;std::memcpy(&offset,code+i+1,4);if(text.address()+i+5+static_cast<std::intptr_t>(offset)==target) {Hook::original=SKSE::GetTrampoline().write_call<5>(text.address()+i,Hook::thunk);++count;}}
+  // Resolve IDs on each runtime; do not use SkyCraft's older fixed +0x2DF offset.
+  // 1.7.104 has the pre-resolve call at RenderWorld+0x11F and the late call at
+  // +0x2DF. Its wrapper takes camera, accumulator and uint32 flags in RCX/RDX/R8.
+  const auto opaque_target=REL::ID(106437).address(),late_target=REL::ID(106438).address();
+  std::vector<std::uintptr_t> opaque_sites,late_sites;
+  const auto end=std::min(target+std::uintptr_t(0x800),text.address()+text.size());
+  for(auto site=target;site+5<=end;++site){
+    const auto* instruction=reinterpret_cast<const std::uint8_t*>(site);if(instruction[0]!=0xe8)continue;
+    std::int32_t offset{};std::memcpy(&offset,instruction+1,4);const auto called=site+5+static_cast<std::intptr_t>(offset);
+    if(called==opaque_target)opaque_sites.push_back(site);if(called==late_target)late_sites.push_back(site);
+  }
+  if(count && opaque_sites.size()==1 && late_sites.size()==1 && opaque_sites[0]<late_sites[0]){
+    OpaqueHook::original=SKSE::GetTrampoline().write_call<5>(opaque_sites[0],OpaqueHook::thunk);
+    spdlog::info("Bridge meshes render before depth resolve and transparent effects; opaque stage offset {:X}",opaque_sites[0]-target);
+  }else spdlog::warn("Opaque-stage hook unavailable/ambiguous; retaining late bridge draw (particle ordering remains limited)");
   REL::Relocation<std::uintptr_t> sun{RE::VTABLE_BSShadowDirectionalLight[0]};
   ShadowHook::original=sun.write_vfunc(0x0A,ShadowHook::thunk);
   spdlog::info("Native sun shadow hook installed; actual car and ball geometry");
